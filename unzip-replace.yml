@@ -1,0 +1,87 @@
+name: Unzip & Replace
+
+# Triggers automatically whenever a .zip file is added/changed anywhere in the repo,
+# OR you can run it manually from the Actions tab (workflow_dispatch) and point it
+# at a specific zip if you have more than one.
+on:
+  push:
+    paths:
+      - '**.zip'
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: 'Path to the zip file to extract (leave blank to auto-detect)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  unzip-replace:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Locate the zip file
+        id: findzip
+        run: |
+          ZIP="${{ github.event.inputs.zip_path }}"
+          if [ -z "$ZIP" ]; then
+            ZIP=$(find . -maxdepth 2 -iname '*.zip' -not -path './.git/*' | head -n1)
+          fi
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
+            echo "::error::No zip file found in the repo."
+            exit 1
+          fi
+          echo "Found: $ZIP"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Extract zip
+        run: |
+          rm -rf /tmp/extracted
+          mkdir -p /tmp/extracted
+          unzip -o "${{ steps.findzip.outputs.zip }}" -d /tmp/extracted
+
+      - name: Flatten if zip has one wrapping folder
+        run: |
+          cd /tmp/extracted
+          shopt -s nullglob dotglob
+          entries=(*)
+          if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
+            inner="${entries[0]}"
+            mv "$inner"/* . 2>/dev/null || true
+            mv "$inner"/.[!.]* . 2>/dev/null || true
+            rmdir "$inner" 2>/dev/null || true
+          fi
+
+      - name: Wipe repo (keeps .git and .github so the workflow survives)
+        run: |
+          find . -mindepth 1 -maxdepth 1 \
+            -not -name '.git' \
+            -not -name '.github' \
+            -exec rm -rf {} +
+
+      - name: Copy extracted files into the repo
+        run: |
+          shopt -s dotglob
+          cp -r /tmp/extracted/* .
+
+      - name: Remove any zip that got copied back in
+        run: |
+          find . -maxdepth 2 -iname '*.zip' -not -path './.git/*' -delete
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing changed, skipping commit."
+            exit 0
+          fi
+          git commit -m "Auto-replace repo contents from uploaded zip [skip ci]"
+          git push
